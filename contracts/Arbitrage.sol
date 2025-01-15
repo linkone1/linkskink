@@ -1,13 +1,18 @@
 // SPDX-License-Identifier: MIT
-pragma solidity <=0.8.10;
+pragma solidity ^0.8.9;
 
 import "@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+
 
 interface Structs {
     struct Val {
         uint256 value; // Mängd 
     }
+
+    event Log(string message, uint256 balanceBefore, uint256 balanceAfter);
+
 
     enum ActionType {
         Deposit, // skaffa tokens
@@ -70,12 +75,19 @@ abstract contract DyDxPool is Structs {
 
 contract DyDxFlashLoan is Structs {
     DyDxPool pool = DyDxPool(0x1E0447b19BB6EcFdAe1e4AE1694b0C3659614e4e); // Addressen för DyDx Poolen vi kommer ta flashlånet ifrån
+    address public owner; // Deklarera ägare variabel
 
     address public WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2; // (WETH/Wrapped Ether) Addressen vi kommer använda flashlånet i
     mapping(address => uint256) public currencies;
 
     constructor() {
+        owner = msg.sender;
         currencies[WETH] = 1;
+    }
+
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Caller is not the owner");
+        _;
     }
 
     modifier onlyPool() {
@@ -84,6 +96,10 @@ contract DyDxFlashLoan is Structs {
             "FlashLoan: could be called by DyDx pool only"
         );
         _;
+    }
+
+    function registerTokens(address token, uint256 marketId) external onlyOwner {
+        currencies[token] = marketId;
     }
 
     function tokenToMarketId(address token) public view returns (uint256) {
@@ -146,12 +162,11 @@ contract DyDxFlashLoan is Structs {
     }
 }
 
+
 contract Arbitrage is DyDxFlashLoan {
     IUniswapV2Router02 public immutable sRouter;
     IUniswapV2Router02 public immutable uRouter;
     IUniswapV2Router02 public immutable pRouter;
-
-    address public owner;
 
     constructor(address _sRouter, address _uRouter, address _pRouter) {
         sRouter = IUniswapV2Router02(_sRouter); // Sushiswap alltså en exchange
@@ -162,6 +177,7 @@ contract Arbitrage is DyDxFlashLoan {
 
     function executeTrade(
         bool _startOnUniswap,
+        bool _startOnPancakeswap,
         address _token0,
         address _token1,
         uint256 _flashAmount
@@ -170,6 +186,7 @@ contract Arbitrage is DyDxFlashLoan {
 
         bytes memory data = abi.encode(
             _startOnUniswap,
+            _startOnPancakeswap,
             _token0,
             _token1,
             _flashAmount,
@@ -186,11 +203,12 @@ contract Arbitrage is DyDxFlashLoan {
     ) external onlyPool {
         (
             bool startOnUniswap,
+            bool startOnPancakeswap,
             address token0,
             address token1,
             uint256 flashAmount,
             uint256 balanceBefore
-        ) = abi.decode(data, (bool, address, address, uint256, uint256));
+        ) = abi.decode(data, (bool, bool, address, address, uint256, uint256));
 
         uint256 balanceAfter = IERC20(token0).balanceOf(address(this));
 
@@ -198,6 +216,10 @@ contract Arbitrage is DyDxFlashLoan {
             balanceAfter - balanceBefore == flashAmount,
             "contract did not get the loan"
         );
+
+
+        // Debugg log
+        emit Log("Before Swap", balanceBefore, balanceAfter);
 
         // Use the money here!
         address[] memory path = new address[](2);
@@ -215,7 +237,18 @@ contract Arbitrage is DyDxFlashLoan {
                 path,
                 IERC20(token1).balanceOf(address(this)),
                 (flashAmount + 1)
-            );
+        );
+        } else if (startOnPancakeswap) {
+            _swapOnPancakeSwap(path, flashAmount, 0);
+
+            path[0] = token1;
+            path[1] = token0;
+
+            _swapOnUniswap(
+                path,
+                IERC20(token1).balanceOf(address(this)),
+                (flashAmount + 1)
+        );
         } else {
             _swapOnSushiswap(path, flashAmount, 0);
 
